@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API = import.meta.env.VITE_API_URL || 'https://admin-burdens.onrender.com'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
@@ -75,7 +75,12 @@ export default function App() {
         doc_types: [form.doc_type],
       }),
     })
-    const { job_id } = await res.json()
+    const data = await res.json()
+    if (!res.ok || !data.job_id) {
+      setScrapeJob({ id: null, status: 'error', error: data.detail || JSON.stringify(data) })
+      return
+    }
+    const { job_id } = data
     setScrapeJob({ id: job_id, status: 'queued', progress: 0, progress_text: '' })
 
     scrapeTimer.current = setInterval(async () => {
