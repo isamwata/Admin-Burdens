@@ -1,0 +1,35 @@
+# Render deployment configuration
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Before deploying:
+#   1. Push this repo to GitHub
+#   2. Connect the repo in the Render dashboard → "New Blueprint"
+#   3. After the backend deploys, copy its public URL and set it as
+#      VITE_API_URL in the frontend service env vars, then redeploy frontend.
+
+services:
+
+  # ── Python / FastAPI backend (Docker) ──────────────────────────────────────
+  - type: web
+    name: ria-backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter        # $7/mo — avoids 15-min spin-down on free tier
+    envVars:
+      - key: PORT
+        value: 8000
+    disk:
+      name: data
+      mountPath: /app/scraped_data
+      sizeGB: 1
+
+  # ── React frontend (static site, free tier) ─────────────────────────────────
+  - type: web
+    name: ria-frontend
+    env: static
+    buildCommand: npm --prefix frontend install && npm --prefix frontend run build
+    staticPublishPath: ./frontend/dist
+    envVars:
+      # ⚠️  Update this to your actual backend URL after first deploy
+      - key: VITE_API_URL
+        value: https://ria-backend.onrender.com

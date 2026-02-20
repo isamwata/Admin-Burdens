@@ -9,6 +9,8 @@ import json
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 from bs4 import BeautifulSoup
 import requests
@@ -66,22 +68,42 @@ for doc_type in document_types:
         formatted_enddate = end_dt.strftime(datetime_format)
         
         start_date = driver.find_element(By.XPATH, "//input[@name='pdd']")
-        start_date.clear()
-        start_date.send_keys(formatted_startdate)
-        
+        driver.execute_script("arguments[0].value = arguments[1]", start_date, start_dt.strftime("%Y-%m-%d"))
+
         end_date = driver.find_element(By.XPATH, "//input[@name='pdf']")
-        end_date.clear()
-        end_date.send_keys(formatted_enddate)
+        driver.execute_script("arguments[0].value = arguments[1]", end_date, end_dt.strftime("%Y-%m-%d"))
         
         zoeken_knop = driver.find_element(By.XPATH, '//button[text()="Zoeken"]')
         zoeken_knop.click()
-        
+
+        # Wait for results page to load
+        WebDriverWait(driver, 10).until(
+            EC.url_contains("rech_res.pl")
+        )
+
         scrape_page = True
-        
+        page_num = 0
+
         while scrape_page:
             html = driver.page_source
-            
+
+            # Save first results page for debugging
+            if page_num == 0:
+                with open("debug_results.html", "w", encoding="utf-8") as f:
+                    f.write(html)
+                print(f"[DEBUG] Results page saved to debug_results.html")
+
+            page_num += 1
             soup = BeautifulSoup(html, features="lxml")
+
+            # Debug: print all div classes found
+            all_divs = soup.find_all("div", class_=True)
+            div_classes = set()
+            for d in all_divs:
+                for c in d.get("class", []):
+                    div_classes.add(c)
+            print(f"[DEBUG] Div classes on page: {sorted(div_classes)}")
+
             for tag in soup.find_all("div", {"class": "list"}):
                 
                 list_item_contents = tag.find_all("div", {"class": "list-item--content"})

@@ -1,2 +1,25 @@
 staatsblad_tf/
 __pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+
+# OS
+.DS_Store
+
+# Debug artifacts
+debug_page.html
+debug_results.html
+
+# Generated output (runtime data)
+scraped_data/*.xlsx
+predictions/*.xlsx
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Env files
+.env
