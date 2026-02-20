@@ -27,9 +27,10 @@ services:
   - type: web
     name: ria-frontend
     env: static
-    buildCommand: npm --prefix frontend install && npm --prefix frontend run build
-    staticPublishPath: ./frontend/dist
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
     envVars:
       # ⚠️  Update this to your actual backend URL after first deploy
       - key: VITE_API_URL
-        value: https://ria-backend.onrender.com
+        value: https://admin-burdens.onrender.com
