@@ -1,0 +1,19 @@
+{
+    "scraping": {
+        "document_types": ["Koninklijk besluit"],
+        "start_date": "05-01-2025",
+        "end_date": "05-31-2025",
+        "datetime_format":  "%m-%d-%Y",
+        "scraping_interval": "M",
+        "url_searchpage" : "https://www.ejustice.just.fgov.be/cgi/rech.pl?language=nl&sum_date=&view_numac=",
+        "url_detail_page": "https://www.ejustice.just.fgov.be/cgi/",
+        "output_location": "./scraped_data/"
+    },
+    "predictions": {
+        "input_location": "./scraped_data/",
+        "embedder_or_tokenizer": "tokenizer",
+        "sentence_embedder": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "model_location": "./model/classifier/",
+        "output_location": "./predictions/"
+    }
+}

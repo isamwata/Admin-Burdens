@@ -1,0 +1,19 @@
+bs4==0.0.1
+numpy==1.26.4
+openpyxl==3.1.2
+pandas==2.2.2
+selenium==4.22.0
+# OLD (comment these out or delete)
+# huggingface_hub==0.15.1
+# sentence-transformers==2.2.2
+# NEW (example versions that work with Python 3.12 and have wheels)
+huggingface_hub==0.22.*
+sentence-transformers==3.0.*
+scikit-learn==1.4.2
+spacy==3.8.4
+spacy-curated-transformers==0.3.0
+spacy-legacy==3.0.12
+spacy-loggers==1.0.5
+spyder-kernels==2.4.*
+tensorflow==2.16.2
+lxml==6.0.*
