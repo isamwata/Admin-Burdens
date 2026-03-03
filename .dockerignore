@@ -1,0 +1,22 @@
+# Never copy the local virtual environment — Docker installs its own
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Dev/debug artifacts
+debug_page.html
+debug_results.html
+
+# Frontend (built separately in its own container)
+frontend/node_modules/
+frontend/dist/
+
+# OS / editor
+.DS_Store
+*.swp
+.env
