@@ -6,18 +6,12 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-# ── Stage 2: Python 3.11 + Chromium runtime ──────────────────────────────────
+# ── Stage 2: Python 3.11 runtime ─────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Chromium stays in sync with its driver — no version mismatch
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        chromium chromium-driver \
         wget ca-certificates gcc libpq-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# Tell the scraper where the binaries live
-ENV CHROME_BIN=/usr/bin/chromium
-ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
 
 WORKDIR /app
 
