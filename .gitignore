@@ -13,9 +13,9 @@ venv/
 debug_page.html
 debug_results.html
 
-# Generated output (runtime data)
-scraped_data/*.xlsx
-predictions/*.xlsx
+# Generated output (runtime data — not committed)
+scraped_data/
+predictions/
 
 # Frontend
 frontend/node_modules/
