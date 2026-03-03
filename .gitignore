@@ -17,6 +17,9 @@ debug_results.html
 scraped_data/
 predictions/
 
+# Model files — stored on HF Model Hub, downloaded at Docker build time
+model/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/

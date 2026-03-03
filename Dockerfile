@@ -28,10 +28,13 @@ RUN pip install --no-cache-dir -r requirements_api.txt
 # Dutch spaCy model (needed by predictor)
 RUN python -m spacy download nl_core_news_sm || true
 
-# Application code + model
+# Application code
 COPY backend/ backend/
 COPY config.json .
-COPY model/ model/
+
+# Download model files from HF Model Hub
+RUN pip install --no-cache-dir huggingface_hub && \
+    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='isamwata/belgian-staatsblad-model', local_dir='./model', repo_type='model')"
 
 # Built frontend from Stage 1
 COPY --from=frontend-builder /build/dist frontend/dist
