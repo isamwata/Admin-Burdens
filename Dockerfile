@@ -1,33 +1,48 @@
-# ── Backend: Python 3.11 + Chromium ──────────────────────────────────────────
+# ── Stage 1: Build React frontend ────────────────────────────────────────────
+FROM node:20-slim AS frontend-builder
+WORKDIR /build
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ── Stage 2: Python 3.11 + Chromium runtime ──────────────────────────────────
 FROM python:3.11-slim
 
-# Install Chromium and its driver (stays in sync, no version mismatch)
+# Chromium stays in sync with its driver — no version mismatch
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        chromium \
-        chromium-driver \
-        wget \
-        ca-certificates \
+        chromium chromium-driver \
+        wget ca-certificates gcc libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Tell the scraper which binaries to use
+# Tell the scraper where the binaries live
 ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
 
 WORKDIR /app
 
-# Install Python deps first (layer cached unless requirements change)
+# Python deps (cached layer)
 COPY requirements_api.txt .
 RUN pip install --no-cache-dir -r requirements_api.txt
 
-# Download Dutch spaCy model
-RUN python -m spacy download nl_core_news_lg
+# Dutch spaCy model (needed by predictor)
+RUN python -m spacy download nl_core_news_sm || true
 
-# Copy the rest of the project
-COPY . .
+# Application code + model
+COPY backend/ backend/
+COPY config.json .
+COPY model/ model/
 
-# Ensure output dirs exist
+# Built frontend from Stage 1
+COPY --from=frontend-builder /build/dist frontend/dist
+
+# Writable output dirs
 RUN mkdir -p scraped_data predictions
 
-EXPOSE 8000
+# HF Spaces runs containers as uid 1000
+RUN chown -R 1000:1000 /app
+USER 1000
 
-CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+EXPOSE 7860
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "7860"]

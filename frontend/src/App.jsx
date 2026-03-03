@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 
-const API = import.meta.env.VITE_API_URL || 'https://admin-burdens.onrender.com'
+// In production (HF Spaces / Docker) the frontend is served by the same
+// FastAPI server, so API calls use the same origin (empty string).
+// For local dev: VITE_API_URL=http://localhost:8002 npm run dev
+const API = import.meta.env.VITE_API_URL || ''
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
   const map = {
-    queued:   { label: 'Queued',   color: '#718096' },
-    scraping: { label: 'Scraping', color: '#d97706' },
-    running:  { label: 'Running',  color: '#d97706' },
-    done:     { label: 'Done',     color: '#276749' },
-    error:    { label: 'Error',    color: '#c53030' },
+    queued:    { label: 'Queued',    color: '#718096' },
+    scraping:  { label: 'Scraping',  color: '#d97706' },
+    running:   { label: 'Running',   color: '#d97706' },
+    ingesting: { label: 'Indexing',  color: '#d97706' },
+    done:      { label: 'Done',      color: '#276749' },
+    error:     { label: 'Error',     color: '#c53030' },
   }
   const s = map[status] || { label: status, color: '#718096' }
   return (
@@ -48,8 +52,12 @@ export default function App() {
   // predict state
   const [predictJob, setPredictJob] = useState(null) // { id, status, error }
 
+  // ingest state (auto-triggered after scrape)
+  const [ingestJob, setIngestJob]   = useState(null) // { id, status, chunks_stored, db_total, message, error }
+
   const scrapeTimer   = useRef(null)
   const predictTimer  = useRef(null)
+  const ingestTimer   = useRef(null)
 
   // Fetch available document types from backend
   useEffect(() => {
@@ -62,7 +70,9 @@ export default function App() {
   // ── scraping ────────────────────────────────────────────────────────────────
   async function handleScrape() {
     clearInterval(scrapeTimer.current)
+    clearInterval(ingestTimer.current)
     setPredictJob(null)
+    setIngestJob(null)
     setPreview([])
     setTotal(0)
 
@@ -92,6 +102,18 @@ export default function App() {
         const p = await fetch(`${API}/api/jobs/${job_id}/preview`).then(r => r.json())
         setPreview(p.data)
         setTotal(p.total)
+
+        // Auto-poll the ingest job the backend triggered automatically
+        if (s.ingest_job_id) {
+          setIngestJob({ id: s.ingest_job_id, status: 'queued', progress_text: 'Starting…' })
+          ingestTimer.current = setInterval(async () => {
+            const ingest = await fetch(`${API}/api/jobs/${s.ingest_job_id}`).then(r => r.json())
+            setIngestJob(prev => ({ ...prev, ...ingest, id: s.ingest_job_id }))
+            if (ingest.status === 'done' || ingest.status === 'error') {
+              clearInterval(ingestTimer.current)
+            }
+          }, 2000)
+        }
       }
       if (s.status === 'error') {
         clearInterval(scrapeTimer.current)
@@ -116,9 +138,10 @@ export default function App() {
     }, 2000)
   }
 
-  const scraping  = scrapeJob?.status === 'scraping' || scrapeJob?.status === 'queued'
+  const scraping   = scrapeJob?.status === 'scraping'  || scrapeJob?.status === 'queued'
   const scrapeDone = scrapeJob?.status === 'done'
-  const predicting = predictJob?.status === 'running' || predictJob?.status === 'queued'
+  const predicting = predictJob?.status === 'running'  || predictJob?.status === 'queued'
+  const ingesting  = ingestJob?.status  === 'ingesting' || ingestJob?.status === 'queued'
 
   return (
     <div className="page">
@@ -262,6 +285,33 @@ export default function App() {
 
             {predictJob.status === 'error' && (
               <p className="err">Prediction failed: {predictJob.error}</p>
+            )}
+          </section>
+        )}
+
+        {/* ── Law DB indexing — auto-triggered, shown silently ──────────── */}
+        {ingestJob && (
+          <section className="card" style={{ borderLeft: '3px solid #2b6cb0' }}>
+            <h2 style={{ fontSize: 15, marginBottom: 6 }}>
+              Law Database Indexing <StatusBadge status={ingestJob.status} />
+            </h2>
+
+            {ingesting && (
+              <>
+                <ProgressBar value={50} />
+                <p className="muted">{ingestJob.progress_text || 'Embedding articles…'}</p>
+              </>
+            )}
+
+            {ingestJob.status === 'done' && (
+              <p className="muted">
+                <strong>{ingestJob.chunks_stored}</strong> new article chunks indexed &nbsp;·&nbsp;
+                <strong>{ingestJob.db_total}</strong> total in law database
+              </p>
+            )}
+
+            {ingestJob.status === 'error' && (
+              <p className="err">Indexing failed: {ingestJob.error}</p>
             )}
           </section>
         )}

@@ -1,6 +1,24 @@
 {
     "scraping": {
-        "document_types": ["Koninklijk besluit"],
+        "document_types": [
+            "Koninklijk besluit",
+            "Ministerieel besluit",
+            "Wet",
+            "Decreet",
+            "Besluit",
+            "Ordonnantie",
+            "Verordening",
+            "Omzendbrief",
+            "Circulaire",
+            "Bericht",
+            "Beschikking",
+            "Financiewet",
+            "Programmawet",
+            "Reglement",
+            "Verdrag",
+            "Samenwerkingsakkoord",
+            "Beroepsverenigingen"
+        ],
         "start_date": "05-01-2025",
         "end_date": "05-31-2025",
         "datetime_format":  "%m-%d-%Y",

@@ -12,6 +12,12 @@ from pydantic import BaseModel
 from .predictor import predict_documents
 from .scraper import scrape_documents
 
+try:
+    from .law_store import create_table, store_chunks, get_stats
+    _LAW_STORE_AVAILABLE = True
+except Exception:
+    _LAW_STORE_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
@@ -82,6 +88,14 @@ def _run_scrape(job_id: str, req: ScrapeRequest):
             result=results, count=len(results),
             excel_file=filepath, filename=filename,
         )
+
+        # Automatically ingest substantive articles into the law DB
+        if _LAW_STORE_AVAILABLE:
+            ingest_job_id = str(uuid.uuid4())
+            JOBS[ingest_job_id] = {"status": "queued", "progress_text": "Waiting to start…", "error": None}
+            JOBS[job_id]["ingest_job_id"] = ingest_job_id
+            _run_ingest(ingest_job_id, job_id)
+
     except Exception as exc:
         JOBS[job_id].update(status="error", error=str(exc))
 
@@ -107,6 +121,38 @@ def _run_predict(job_id: str, scrape_job_id: str):
             result=result.to_dict(orient="records"),
             excel_file=filepath,
             filename=filename,
+        )
+    except Exception as exc:
+        JOBS[job_id].update(status="error", error=str(exc))
+
+
+def _run_ingest(job_id: str, scrape_job_id: str):
+    """Embed substantive articles from a completed scrape job and store in law_chunks."""
+    try:
+        JOBS[job_id]["status"] = "ingesting"
+        scrape_job = JOBS.get(scrape_job_id, {})
+
+        if scrape_job.get("status") != "done":
+            raise ValueError("Scrape job is not complete")
+
+        results = scrape_job.get("result", [])
+        to_embed = [r for r in results if r.get("embed") and r.get("articles")]
+
+        if not to_embed:
+            JOBS[job_id].update(status="done", chunks_stored=0,
+                                message="No substantive articles found to embed.")
+            return
+
+        JOBS[job_id]["progress_text"] = f"Embedding {sum(len(r['articles']) for r in to_embed)} chunks…"
+        create_table()
+        stored = store_chunks(to_embed)
+        stats  = get_stats()
+
+        JOBS[job_id].update(
+            status="done",
+            chunks_stored=stored,
+            db_total=stats["total_chunks"],
+            message=f"Stored {stored} chunks. DB now has {stats['total_chunks']} law chunks total.",
         )
     except Exception as exc:
         JOBS[job_id].update(status="error", error=str(exc))
@@ -167,6 +213,35 @@ def start_predict(scrape_job_id: str, background_tasks: BackgroundTasks):
     return {"job_id": job_id}
 
 
+@app.post("/api/ingest/{scrape_job_id}")
+def start_ingest(scrape_job_id: str, background_tasks: BackgroundTasks):
+    """Embed and store substantive articles from a completed scrape job into law_chunks."""
+    if not _LAW_STORE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Law database not configured")
+    scrape_job = JOBS.get(scrape_job_id)
+    if not scrape_job:
+        raise HTTPException(status_code=404, detail="Scrape job not found")
+    if scrape_job.get("status") != "done":
+        raise HTTPException(status_code=400, detail="Scrape job is not complete yet")
+
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {"status": "queued", "progress_text": "Waiting to start…", "error": None}
+    background_tasks.add_task(_run_ingest, job_id, scrape_job_id)
+    return {"job_id": job_id}
+
+
+@app.get("/api/law-stats")
+def law_stats():
+    """Return current law_chunks DB statistics."""
+    if not _LAW_STORE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Law database not configured")
+    try:
+        stats = get_stats()
+        return stats
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/download/{job_id}")
 def download(job_id: str):
     job = JOBS.get(job_id)
@@ -180,3 +255,16 @@ def download(job_id: str):
         filename=job["filename"],
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+# ---------------------------------------------------------------------------
+# Serve React frontend (production / Docker / HF Spaces)
+# Must be mounted AFTER all API routes so /api/* takes priority
+# ---------------------------------------------------------------------------
+_frontend_dist = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "frontend", "dist",
+)
+if os.path.isdir(_frontend_dist):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="static")
