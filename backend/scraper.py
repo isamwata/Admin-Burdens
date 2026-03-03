@@ -1,14 +1,9 @@
-import os
 import re
 from datetime import datetime
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import Select, WebDriverWait
 
 
 # ---------------------------------------------------------------------------
@@ -111,29 +106,50 @@ def split_into_articles(text: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Chrome driver
+# HTTP helpers (replaces Selenium — ejustice is a plain CGI site)
 # ---------------------------------------------------------------------------
 
-def get_driver():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-setuid-sandbox")
-    options.add_argument("--no-zygote")               # prevents zygote process crash in restricted containers
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--user-data-dir=/tmp/chrome-user-data")
+BASE_URL    = "https://www.ejustice.just.fgov.be/cgi"
+SEARCH_URL  = BASE_URL + "/rech_res.pl"
+LIST_URL    = BASE_URL + "/list.pl"
+HEADERS     = {"Content-Type": "application/x-www-form-urlencoded"}
+TODAY       = datetime.today().strftime("%Y-%m-%d")
 
-    chrome_bin = os.environ.get("CHROME_BIN")
-    if chrome_bin:
-        options.binary_location = chrome_bin
 
-    chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
-    if chromedriver_path:
-        from selenium.webdriver.chrome.service import Service
-        return webdriver.Chrome(service=Service(chromedriver_path), options=options)
+def _fetch_search_page(url_searchpage: str) -> set:
+    """Return the set of valid doc-type option texts from the search form."""
+    resp = requests.get(url_searchpage, timeout=15)
+    resp.encoding = "iso-8859-1"
+    soup = BeautifulSoup(resp.text, "html.parser")
+    select = soup.find("select", {"name": "dt"})
+    if not select:
+        return set()
+    return {opt.text.strip() for opt in select.find_all("option") if opt.text.strip()}
 
-    return webdriver.Chrome(options=options)
+
+def _parse_result_items(soup: BeautifulSoup, doc_type: str) -> list:
+    """Extract result items from a parsed results/list page."""
+    items = []
+    for tag in soup.find_all("div", {"class": "list"}):
+        contents = tag.find_all("div", {"class": "list-item--content"})
+        buttons  = tag.find_all("div", {"class": "list-item--button"})
+        for content, button in zip(contents, buttons):
+            anchor   = content.find("a", href=True)
+            pub_date = content.find("p", {"class": "list-item--date"})
+            if not anchor:
+                continue
+            # href is relative to /cgi/ (e.g. "article.pl?...")
+            # Force lg_txt=Y to get full article text
+            href = anchor["href"].replace("lg_txt=N", "lg_txt=Y")
+            url  = urljoin(BASE_URL + "/", href)
+            items.append({
+                "ref_number": button.text.strip(),
+                "pub_date":   pub_date.text if pub_date else "",
+                "short_text": anchor.text.strip(),
+                "url":        url,
+                "doc_type":   doc_type,
+            })
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -145,107 +161,84 @@ def scrape_documents(start_date: datetime, end_date: datetime, doc_types: list,
                      progress_callback=None, max_results: int = None):
     """Scrape ejustice.just.fgov.be for Belgian regulatory documents.
 
+    Uses plain HTTP requests — no browser or ChromeDriver required.
+
     Args:
-        start_date:       Start of publication date range.
-        end_date:         End of publication date range.
-        doc_types:        List of document type strings matching the site dropdown.
-        url_searchpage:   URL of the ejustice search form.
-        url_detail_page:  Base URL for building detail page links.
+        start_date:        Start of publication date range.
+        end_date:          End of publication date range.
+        doc_types:         List of document type strings matching the site dropdown.
+        url_searchpage:    URL of the ejustice search form (used to verify types).
+        url_detail_page:   Base URL for building detail page links.
         progress_callback: Optional callable(current, total) for progress reporting.
-        max_results:      Cap total results per doc_type (useful for testing).
+        max_results:       Cap total results per doc_type (useful for testing).
 
     Returns:
         List of dicts with keys:
           ref_number, pub_date, short_text, url, doc_type,
           long_text, articles, embed (bool)
     """
-    driver = get_driver()
+    valid_types = _fetch_search_page(url_searchpage)
     scraping_result = []
 
-    try:
-        for doc_type in doc_types:
-            if doc_type in SKIP_TYPES:
-                continue
+    for doc_type in doc_types:
+        if doc_type in SKIP_TYPES:
+            continue
 
-            # Verify document type exists on the site
-            driver.get(url_searchpage)
-            element = driver.find_element(By.XPATH, "//select[@name='dt']")
-            all_options = [opt.text for opt in element.find_elements(By.TAG_NAME, "option")]
+        if valid_types and doc_type not in valid_types:
+            print(f"  [skip] '{doc_type}' not found in site dropdown")
+            continue
 
-            if doc_type not in all_options:
-                print(f"  [skip] '{doc_type}' not found in site dropdown")
-                continue
+        type_results = []
 
-            # Fill and submit search form
-            driver.get(url_searchpage)
-            Select(driver.find_element(By.XPATH, "//select[@name='dt']")).select_by_value(doc_type)
+        # First page: POST to the search endpoint
+        resp = requests.post(
+            SEARCH_URL,
+            data={
+                "dt":       doc_type,
+                "pdd":      start_date.strftime("%Y-%m-%d"),
+                "pdf":      end_date.strftime("%Y-%m-%d"),
+                "language": "nl",
+                "sum_date": TODAY,
+            },
+            headers=HEADERS,
+            timeout=30,
+        )
+        resp.encoding = "iso-8859-1"
 
-            start_el = driver.find_element(By.XPATH, "//input[@name='pdd']")
-            driver.execute_script("arguments[0].value = arguments[1]", start_el, start_date.strftime("%Y-%m-%d"))
-
-            end_el = driver.find_element(By.XPATH, "//input[@name='pdf']")
-            driver.execute_script("arguments[0].value = arguments[1]", end_el, end_date.strftime("%Y-%m-%d"))
-
-            driver.find_element(By.XPATH, '//button[text()="Zoeken"]').click()
-            WebDriverWait(driver, 10).until(EC.url_contains("rech_res.pl"))
-
-            type_results = []
-
-            # Paginate through results
-            while True:
-                soup = BeautifulSoup(driver.page_source, features="lxml")
-
-                for tag in soup.find_all("div", {"class": "list"}):
-                    contents = tag.find_all("div", {"class": "list-item--content"})
-                    buttons = tag.find_all("div", {"class": "list-item--button"})
-
-                    for content, button in zip(contents, buttons):
-                        anchor = content.find("a", href=True)
-                        pub_date = content.find("p", {"class": "list-item--date"})
-                        if not anchor:
-                            continue
-                        type_results.append({
-                            "ref_number": button.text.strip(),
-                            "pub_date": pub_date.text if pub_date else "",
-                            "short_text": anchor.text.strip(),
-                            "url": urljoin(url_searchpage, anchor["href"]),
-                            "doc_type": doc_type,
-                        })
-                        if max_results and len(type_results) >= max_results:
-                            break
-
-                    if max_results and len(type_results) >= max_results:
-                        break
-
+        while True:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            page_items = _parse_result_items(soup, doc_type)
+            for item in page_items:
+                type_results.append(item)
                 if max_results and len(type_results) >= max_results:
                     break
 
-                try:
-                    next_btn = driver.find_element(
-                        By.XPATH, "//a[@class='pagination-button pagination-next']"
-                    )
-                    next_btn.click()
-                except Exception:
-                    break
+            if max_results and len(type_results) >= max_results:
+                break
 
-            scraping_result.extend(type_results)
+            # Follow pagination via GET to list.pl
+            next_btn = soup.find("a", {"class": "pagination-button pagination-next"})
+            if not next_btn:
+                break
 
-    finally:
-        driver.quit()
+            next_url = urljoin(BASE_URL + "/", next_btn["href"])
+            resp = requests.get(next_url, timeout=30)
+            resp.encoding = "iso-8859-1"
+
+        scraping_result.extend(type_results)
 
     # Fetch full text and classify each result
     total = len(scraping_result)
     for i, item in enumerate(scraping_result):
         try:
             page = requests.get(item["url"], timeout=15)
-            soup = BeautifulSoup(page.text, features="lxml")
-            main = soup.find("main", {"class": "page__inner page__inner--content article-text"})
+            page.encoding = "iso-8859-1"
+            soup = BeautifulSoup(page.text, "html.parser")
+            main = soup.find("main", class_="article-text")
 
-            # FIX: extract ALL text, not just the first <p>
             full_text = main.get_text(separator="\n", strip=True) if main else ""
             item["long_text"] = full_text
 
-            # Decide whether to embed and split into articles
             if is_substantive(full_text, item["doc_type"]):
                 item["articles"] = split_into_articles(full_text)
                 item["embed"] = True
@@ -253,7 +246,7 @@ def scrape_documents(start_date: datetime, end_date: datetime, doc_types: list,
                 item["articles"] = []
                 item["embed"] = False
 
-        except Exception as e:
+        except Exception:
             item["long_text"] = ""
             item["articles"] = []
             item["embed"] = False
