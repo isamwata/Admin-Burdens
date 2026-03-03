@@ -116,15 +116,13 @@ def split_into_articles(text: str) -> list:
 
 def get_driver():
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")           # modern headless mode
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-setuid-sandbox") # required alongside --no-sandbox in containers
-    options.add_argument("--disable-dev-shm-usage")  # avoid /dev/shm size limits
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--no-zygote")               # prevents zygote process crash in restricted containers
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--disable-features=VizDisplayCompositor")
-    options.add_argument("--single-process")          # avoids fork/clone syscall restrictions in HF Spaces
-    options.add_argument("--user-data-dir=/tmp/chrome-user-data")  # writable temp dir
+    options.add_argument("--user-data-dir=/tmp/chrome-user-data")
 
     chrome_bin = os.environ.get("CHROME_BIN")
     if chrome_bin:
