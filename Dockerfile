@@ -24,6 +24,7 @@ RUN python -m spacy download nl_core_news_sm || true
 
 # Application code
 COPY backend/ backend/
+COPY scripts/ scripts/
 COPY config.json .
 
 # Download model files from HF Model Hub
