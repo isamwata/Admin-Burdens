@@ -20,7 +20,7 @@ COPY requirements_api.txt .
 RUN pip install --no-cache-dir -r requirements_api.txt
 
 # Dutch spaCy model (needed by predictor)
-RUN python -m spacy download nl_core_news_sm || true
+RUN python -m spacy download nl_core_news_lg || true
 
 # Application code
 COPY backend/ backend/
