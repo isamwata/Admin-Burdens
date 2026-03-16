@@ -74,35 +74,42 @@ def is_substantive(text: str, doc_type: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Article-level chunking
+# Sliding-window chunking over full law text
 # ---------------------------------------------------------------------------
 
-_ARTICLE_RE = re.compile(
-    r"(?m)^\s*(Art(?:ikel|icle)?[.\s]\s*(\d+)[^\n]*)",
-)
+_CHUNK_WORDS   = 400   # target chunk size in words
+_OVERLAP_WORDS = 100   # overlap between consecutive chunks
 
 
-def split_into_articles(text: str) -> list:
-    """Split full law text into article-level chunks.
+def sliding_window_chunks(text: str, chunk_words: int = _CHUNK_WORDS,
+                          overlap_words: int = _OVERLAP_WORDS) -> list:
+    """Split full law text into overlapping fixed-size word windows.
+
+    Each chunk is large enough to carry meaningful context for the
+    administrative-burden classifier, and the overlap ensures that
+    clause boundaries never fall in a dead zone between chunks.
 
     Returns a list of dicts: {article_num, text}
-    Falls back to a single chunk when no article structure is found.
+    where article_num is "chunk_N" (1-based).
     """
-    matches = list(_ARTICLE_RE.finditer(text))
-    if not matches:
-        return [{"article_num": "full", "text": text.strip()}]
+    words = text.split()
+    if not words:
+        return []
 
-    articles = []
-    for i, match in enumerate(matches):
-        start = match.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        article_text = text[start:end].strip()
-        if article_text:
-            articles.append({
-                "article_num": match.group(2),
-                "text": article_text,
-            })
-    return articles
+    step   = max(1, chunk_words - overlap_words)
+    chunks = []
+    i      = 0
+    n      = 0
+
+    while i < len(words):
+        window = words[i: i + chunk_words]
+        chunk_text = " ".join(window).strip()
+        if chunk_text:
+            n += 1
+            chunks.append({"article_num": f"chunk_{n}", "text": chunk_text})
+        i += step
+
+    return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +247,7 @@ def scrape_documents(start_date: datetime, end_date: datetime, doc_types: list,
             item["long_text"] = full_text
 
             if is_substantive(full_text, item["doc_type"]):
-                item["articles"] = split_into_articles(full_text)
+                item["articles"] = sliding_window_chunks(full_text)
                 item["embed"] = True
             else:
                 item["articles"] = []

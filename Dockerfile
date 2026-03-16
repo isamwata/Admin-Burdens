@@ -37,10 +37,11 @@ COPY --from=frontend-builder /build/dist frontend/dist
 # Writable output dirs
 RUN mkdir -p scraped_data predictions
 
-# HF Spaces runs containers as uid 1000
+# HF Spaces runs containers as uid 1000; Cloud Run runs as root — both work
 RUN chown -R 1000:1000 /app
 USER 1000
 
-EXPOSE 7860
+# Cloud Run injects $PORT; HF Spaces uses 7860
+EXPOSE 8080
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8080}

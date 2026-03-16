@@ -62,10 +62,24 @@ CREATE TABLE IF NOT EXISTS law_chunks (
     text        TEXT    NOT NULL,
     word_count  INTEGER,
     url         TEXT,
-    language    TEXT    DEFAULT 'nl',
+    language    TEXT     DEFAULT 'nl',
+    prediction  SMALLINT,          -- 0 = no burden, 1 = has burden, NULL = not predicted
+    certainty   FLOAT,             -- model confidence: -1.0 to 1.0
     embedding   vector(1536),
     created_at  TIMESTAMPTZ DEFAULT now()
 );
+"""
+
+# Run once against an existing DB to add the new columns
+MIGRATE_ADD_PREDICTION_SQL = """
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='law_chunks' AND column_name='prediction') THEN
+        ALTER TABLE law_chunks ADD COLUMN prediction SMALLINT;
+        ALTER TABLE law_chunks ADD COLUMN certainty  FLOAT;
+    END IF;
+END$$;
 """
 
 CREATE_INDEXES_SQL = [
@@ -84,6 +98,7 @@ def create_table(conn=None):
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             cur.execute(CREATE_TABLE_SQL)
+            cur.execute(MIGRATE_ADD_PREDICTION_SQL)  # no-op if columns already exist
             for idx_sql in CREATE_INDEXES_SQL:
                 try:
                     cur.execute(idx_sql)
@@ -132,12 +147,15 @@ def make_chunk_id(numac: str, article_num: str) -> str:
 
 def store_chunks(items: list[dict], conn=None) -> int:
     """
-    Embed and store article chunks from scraper output.
+    Embed and store sliding-window chunks from scraper output.
 
     Args:
         items:  List of scraper result dicts with embed=True.
                 Each item must have: ref_number, doc_type, short_text,
-                pub_date, url, articles (list of {article_num, text})
+                pub_date, url, articles (list of {article_num, text}).
+                Optionally: chunk_predictions (dict of article_num ->
+                {prediction: int, certainty: float}) set by main.py
+                after running predict_documents() per chunk.
         conn:   Optional existing psycopg2 connection (for testing).
 
     Returns:
@@ -147,37 +165,38 @@ def store_chunks(items: list[dict], conn=None) -> int:
     if own:
         conn = _connect()
 
-    rows_to_insert = []
-
-    # Build flat list of (chunk_id, text, metadata) for all articles
+    # Build flat list of (chunk_id, text, metadata) for all chunks
     meta = []
     texts = []
 
     for item in items:
         if not item.get("embed") or not item.get("articles"):
             continue
+        chunk_preds = item.get("chunk_predictions", {})
         for art in item["articles"]:
             if not art["text"].strip():
                 continue
             chunk_id = make_chunk_id(item["ref_number"], art["article_num"])
+            pred_info = chunk_preds.get(art["article_num"], {})
             texts.append(art["text"])
             meta.append({
-                "chunk_id":   chunk_id,
-                "numac":      item["ref_number"],
-                "doc_type":   item["doc_type"],
-                "title":      item.get("short_text", "")[:500],
-                "pub_date":   item.get("pub_date", ""),
+                "chunk_id":    chunk_id,
+                "numac":       item["ref_number"],
+                "doc_type":    item["doc_type"],
+                "title":       item.get("short_text", "")[:500],
+                "pub_date":    item.get("pub_date", ""),
                 "article_num": art["article_num"],
-                "text":       art["text"],
-                "word_count": len(art["text"].split()),
-                "url":        item.get("url", ""),
+                "text":        art["text"],
+                "word_count":  len(art["text"].split()),
+                "url":         item.get("url", ""),
+                "prediction":  pred_info.get("prediction"),   # None if not predicted
+                "certainty":   pred_info.get("certainty"),
             })
 
     if not texts:
         return 0
 
-    # Deduplicate by chunk_id — keeps last occurrence, prevents
-    # "ON CONFLICT DO UPDATE cannot affect row a second time" error
+    # Deduplicate by chunk_id
     seen: dict[str, int] = {}
     for i, m in enumerate(meta):
         seen[m["chunk_id"]] = i
@@ -193,7 +212,7 @@ def store_chunks(items: list[dict], conn=None) -> int:
         (
             m["chunk_id"], m["numac"], m["doc_type"], m["title"],
             m["pub_date"], m["article_num"], m["text"], m["word_count"],
-            m["url"], "nl",
+            m["url"], "nl", m["prediction"], m["certainty"],
             embeddings[i],
         )
         for i, m in enumerate(meta)
@@ -202,11 +221,14 @@ def store_chunks(items: list[dict], conn=None) -> int:
     upsert_sql = """
         INSERT INTO law_chunks
             (chunk_id, numac, doc_type, title, pub_date,
-             article_num, text, word_count, url, language, embedding)
+             article_num, text, word_count, url, language,
+             prediction, certainty, embedding)
         VALUES %s
         ON CONFLICT (chunk_id) DO UPDATE SET
             text        = EXCLUDED.text,
             word_count  = EXCLUDED.word_count,
+            prediction  = EXCLUDED.prediction,
+            certainty   = EXCLUDED.certainty,
             embedding   = EXCLUDED.embedding,
             title       = EXCLUDED.title,
             pub_date    = EXCLUDED.pub_date,
@@ -217,7 +239,7 @@ def store_chunks(items: list[dict], conn=None) -> int:
         with conn.cursor() as cur:
             execute_values(
                 cur, upsert_sql, rows,
-                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)",
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)",
             )
         conn.commit()
     finally:
@@ -286,6 +308,71 @@ def search_law_chunks(
             cur.execute(sql, params)
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        if own:
+            conn.close()
+
+
+# ── Direct title / numac lookup ───────────────────────────────────────────────
+
+def search_law_chunks_by_title(
+    terms: list[str],
+    k: int = 20,
+    conn=None,
+) -> list[dict]:
+    """
+    Full-text ILIKE search against law_chunks.title and numac.
+
+    Used when the proposal text contains an explicit law reference
+    (e.g., "Koninklijk Besluit van 28 december 1944").  Each term in
+    *terms* is ANDed together via ILIKE wildcards so that date fragments
+    ("1944"), keyword phrases ("sociale zekerheid"), or partial NUMAC
+    numbers can be combined.
+
+    Args:
+        terms: List of string fragments (case-insensitive, partial match).
+               E.g. ["1944", "december", "sociale zekerheid"]
+        k:     Max rows to return.
+        conn:  Optional existing psycopg2 connection.
+
+    Returns:
+        List of dicts with keys: chunk_id, numac, doc_type, title,
+        pub_date, article_num, text, url.  No similarity field.
+    """
+    if not terms:
+        return []
+
+    own = conn is None
+    if own:
+        conn = _connect()
+
+    def _query(cur, search_terms):
+        clauses, params = [], []
+        for t in search_terms:
+            clauses.append("(title ILIKE %s OR numac ILIKE %s)")
+            params.extend([f"%{t}%", f"%{t}%"])
+        params.append(k)
+        sql = f"""
+            SELECT chunk_id, numac, doc_type, title, pub_date,
+                   article_num, text, url
+            FROM   law_chunks
+            WHERE  {" AND ".join(clauses)}
+            ORDER  BY pub_date DESC NULLS LAST
+            LIMIT  %s
+        """
+        cur.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    try:
+        with conn.cursor() as cur:
+            # Try with all terms; if empty, progressively drop the last term
+            # (most specific → least specific fallback), minimum 2 terms
+            for n in range(len(terms), 1, -1):
+                rows = _query(cur, terms[:n])
+                if rows:
+                    return rows
+            return []
     finally:
         if own:
             conn.close()

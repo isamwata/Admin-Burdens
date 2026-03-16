@@ -103,14 +103,14 @@ export default function App() {
         setPreview(p.data)
         setTotal(p.total)
 
-        // Auto-poll the ingest job the backend triggered automatically
-        if (s.ingest_job_id) {
-          setIngestJob({ id: s.ingest_job_id, status: 'queued', progress_text: 'Starting…' })
-          ingestTimer.current = setInterval(async () => {
-            const ingest = await fetch(`${API}/api/jobs/${s.ingest_job_id}`).then(r => r.json())
-            setIngestJob(prev => ({ ...prev, ...ingest, id: s.ingest_job_id }))
-            if (ingest.status === 'done' || ingest.status === 'error') {
-              clearInterval(ingestTimer.current)
+        // Auto-poll the predict+store job triggered by the backend
+        if (s.predict_job_id) {
+          setPredictJob({ id: s.predict_job_id, status: 'queued', progress_text: 'Starting…' })
+          predictTimer.current = setInterval(async () => {
+            const pj = await fetch(`${API}/api/jobs/${s.predict_job_id}`).then(r => r.json())
+            setPredictJob(prev => ({ ...prev, ...pj, id: s.predict_job_id }))
+            if (pj.status === 'done' || pj.status === 'error') {
+              clearInterval(predictTimer.current)
             }
           }, 2000)
         }
@@ -252,27 +252,24 @@ export default function App() {
                 Download Scraping Results (Excel)
               </a>
 
-              {total > 0 && (
-                <button className="btn primary"
-                  onClick={handlePredict}
-                  disabled={predicting}>
-                  {predicting ? 'Running Predictions…' : 'Run Predictions'}
-                </button>
-              )}
+              {/* Predictions run automatically after scrape — no manual button needed */}
             </div>
           </section>
         )}
 
-        {/* ── Step 4: Predictions ───────────────────────────────────────── */}
+        {/* ── Step 4: Predict + Store (auto-triggered after scrape) ────── */}
         {predictJob && (
           <section className="card">
-            <h2><span className="step">4</span> Predictions <StatusBadge status={predictJob.status} /></h2>
+            <h2><span className="step">4</span> Predict &amp; Store <StatusBadge status={predictJob.status} /></h2>
 
-            {predicting && <p className="muted">Running ML model, please wait…</p>}
+            {predicting && <p className="muted">{predictJob.progress_text || 'Running ML model…'}</p>}
 
             {predictJob.status === 'done' && (
               <>
                 <p className="ok">Predictions complete.</p>
+                {predictJob.progress_text && (
+                  <p className="muted" style={{ fontSize: 13 }}>{predictJob.progress_text}</p>
+                )}
                 <div className="action-row">
                   <a className="btn secondary"
                     href={`${API}/api/download/${predictJob.id}`}

@@ -62,13 +62,14 @@ class ScrapeRequest(BaseModel):
 # Background tasks
 # ---------------------------------------------------------------------------
 def _run_scrape(job_id: str, req: ScrapeRequest):
+    """Scrape documents and keep results in memory only — no DB write yet."""
     def progress(done, total):
         JOBS[job_id]["progress"] = int(done / total * 100)
         JOBS[job_id]["progress_text"] = f"Fetching detail {done}/{total}"
 
     try:
         JOBS[job_id]["status"] = "scraping"
-        JOBS[job_id]["progress_text"] = "Launching browser…"
+        JOBS[job_id]["progress_text"] = "Fetching documents…"
 
         results = scrape_documents(
             start_date=datetime.combine(req.start_date, datetime.min.time()),
@@ -89,18 +90,27 @@ def _run_scrape(job_id: str, req: ScrapeRequest):
             excel_file=filepath, filename=filename,
         )
 
-        # Automatically ingest substantive articles into the law DB
-        if _LAW_STORE_AVAILABLE:
-            ingest_job_id = str(uuid.uuid4())
-            JOBS[ingest_job_id] = {"status": "queued", "progress_text": "Waiting to start…", "error": None}
-            JOBS[job_id]["ingest_job_id"] = ingest_job_id
-            _run_ingest(ingest_job_id, job_id)
+        # Auto-trigger predict + embed + store immediately after scrape
+        predict_job_id = str(uuid.uuid4())
+        JOBS[predict_job_id] = {"status": "queued", "progress_text": "Starting…", "error": None}
+        JOBS[job_id]["predict_job_id"] = predict_job_id
+        _run_predict(predict_job_id, job_id)
 
     except Exception as exc:
         JOBS[job_id].update(status="error", error=str(exc))
 
 
 def _run_predict(job_id: str, scrape_job_id: str):
+    """
+    Run per-chunk predictions on scraped documents, then store chunks +
+    predicted labels into the law_chunks DB table.
+
+    Flow:
+      1. For each substantive document, build one DataFrame row per chunk
+      2. predict_documents() assigns prediction (0/1) + certainty per chunk
+      3. Chunks with labels are embedded (OpenAI) and upserted into law_chunks
+      4. Excel summary of document-level results saved for download
+    """
     try:
         JOBS[job_id]["status"] = "running"
         scrape_job = JOBS.get(scrape_job_id, {})
@@ -108,52 +118,70 @@ def _run_predict(job_id: str, scrape_job_id: str):
         if scrape_job.get("status") != "done":
             raise ValueError("Scrape job is not complete")
 
-        dataset = pd.DataFrame(scrape_job["result"])
-        result = predict_documents(dataset, CONFIG["predictions"])
+        results  = scrape_job.get("result", [])
+        to_embed = [r for r in results if r.get("embed") and r.get("articles")]
 
+        # ── Step 1: predict per chunk ────────────────────────────────────────
+        total_chunks = sum(len(r["articles"]) for r in to_embed)
+        JOBS[job_id]["progress_text"] = f"Predicting burden on {total_chunks} chunks…"
+
+        doc_level_rows = []   # one row per document for the Excel download
+
+        for item in to_embed:
+            # embedder.preprocess and tokenizer.preprocess both read 'long_text'
+            chunk_rows = pd.DataFrame([
+                {"long_text": art["text"], "ref_number": item["ref_number"],
+                 "doc_type": item["doc_type"], "short_text": item.get("short_text", "")}
+                for art in item["articles"]
+            ])
+            pred_df = predict_documents(chunk_rows, CONFIG["predictions"])
+
+            # Attach per-chunk prediction back to the item for store_chunks()
+            item["chunk_predictions"] = {
+                art["article_num"]: {
+                    "prediction": int(pred_df.iloc[i]["prediction"]),
+                    "certainty":  float(pred_df.iloc[i]["certainty"]),
+                }
+                for i, art in enumerate(item["articles"])
+            }
+
+            # Document-level summary: majority vote across chunks
+            preds = [v["prediction"] for v in item["chunk_predictions"].values()]
+            doc_prediction = 1 if sum(preds) > len(preds) / 2 else 0
+            doc_certainty  = sum(v["certainty"] for v in item["chunk_predictions"].values()) / len(preds)
+            doc_level_rows.append({
+                **{k: item[k] for k in ("ref_number", "doc_type", "short_text", "pub_date", "url")
+                   if k in item},
+                "prediction": doc_prediction,
+                "certainty":  round(doc_certainty, 3),
+                "chunks":     len(preds),
+            })
+
+        # ── Step 2: save Excel of document-level results ─────────────────────
+        result_df = pd.DataFrame(doc_level_rows)
         ts = str(datetime.now().timestamp()).replace(".", "_")
         filename = f"{ts}_predictions.xlsx"
         filepath = os.path.join(PREDICT_DIR, filename)
-        result.to_excel(filepath)
+        result_df.to_excel(filepath, index=False)
+
+        # ── Step 3: embed chunks + store in DB with prediction labels ─────────
+        if _LAW_STORE_AVAILABLE and to_embed:
+            JOBS[job_id]["progress_text"] = f"Storing {total_chunks} chunks in law database…"
+            create_table()
+            stored = store_chunks(to_embed)
+            stats  = get_stats()
+            db_msg = f" · {stored} chunks stored in law DB ({stats['total_chunks']} total)"
+        else:
+            db_msg = ""
 
         JOBS[job_id].update(
             status="done",
-            result=result.to_dict(orient="records"),
+            result=doc_level_rows,
             excel_file=filepath,
             filename=filename,
+            progress_text=f"Done{db_msg}",
         )
-    except Exception as exc:
-        JOBS[job_id].update(status="error", error=str(exc))
 
-
-def _run_ingest(job_id: str, scrape_job_id: str):
-    """Embed substantive articles from a completed scrape job and store in law_chunks."""
-    try:
-        JOBS[job_id]["status"] = "ingesting"
-        scrape_job = JOBS.get(scrape_job_id, {})
-
-        if scrape_job.get("status") != "done":
-            raise ValueError("Scrape job is not complete")
-
-        results = scrape_job.get("result", [])
-        to_embed = [r for r in results if r.get("embed") and r.get("articles")]
-
-        if not to_embed:
-            JOBS[job_id].update(status="done", chunks_stored=0,
-                                message="No substantive articles found to embed.")
-            return
-
-        JOBS[job_id]["progress_text"] = f"Embedding {sum(len(r['articles']) for r in to_embed)} chunks…"
-        create_table()
-        stored = store_chunks(to_embed)
-        stats  = get_stats()
-
-        JOBS[job_id].update(
-            status="done",
-            chunks_stored=stored,
-            db_total=stats["total_chunks"],
-            message=f"Stored {stored} chunks. DB now has {stats['total_chunks']} law chunks total.",
-        )
     except Exception as exc:
         JOBS[job_id].update(status="error", error=str(exc))
 
@@ -212,22 +240,6 @@ def start_predict(scrape_job_id: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_predict, job_id, scrape_job_id)
     return {"job_id": job_id}
 
-
-@app.post("/api/ingest/{scrape_job_id}")
-def start_ingest(scrape_job_id: str, background_tasks: BackgroundTasks):
-    """Embed and store substantive articles from a completed scrape job into law_chunks."""
-    if not _LAW_STORE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Law database not configured")
-    scrape_job = JOBS.get(scrape_job_id)
-    if not scrape_job:
-        raise HTTPException(status_code=404, detail="Scrape job not found")
-    if scrape_job.get("status") != "done":
-        raise HTTPException(status_code=400, detail="Scrape job is not complete yet")
-
-    job_id = str(uuid.uuid4())
-    JOBS[job_id] = {"status": "queued", "progress_text": "Waiting to start…", "error": None}
-    background_tasks.add_task(_run_ingest, job_id, scrape_job_id)
-    return {"job_id": job_id}
 
 
 @app.get("/api/law-stats")
