@@ -120,10 +120,25 @@ def _run_predict(job_id: str, scrape_job_id: str):
             raise ValueError("Scrape job is not complete")
 
         results  = scrape_job.get("result", [])
-        to_embed = [r for r in results if r.get("embed") and r.get("articles")]
+
+        # Predict on ALL documents that have text (mirrors original predict.py behaviour)
+        to_predict = [r for r in results if r.get("long_text")]
+
+        # Every predicted document is stored as one full-text chunk
+        for item in to_predict:
+            if not item.get("articles"):
+                item["articles"] = [{"article_num": "full", "text": item["long_text"]}]
+        to_embed = to_predict
 
         # ── Step 1: predict on full document text (one row per document) ─────
-        JOBS[job_id]["progress_text"] = f"Predicting burden on {len(to_embed)} documents…"
+        JOBS[job_id]["progress_text"] = f"Predicting burden on {len(to_predict)} documents…"
+
+        if not to_predict:
+            JOBS[job_id].update(
+                status="done", result=[],
+                progress_text="Done — no documents with text to predict",
+            )
+            return
 
         doc_rows = pd.DataFrame([
             {
@@ -132,32 +147,40 @@ def _run_predict(job_id: str, scrape_job_id: str):
                 "doc_type":   item["doc_type"],
                 "short_text": item.get("short_text", ""),
             }
-            for item in to_embed
+            for item in to_predict
         ])
 
         pred_df = predict_documents(doc_rows, CONFIG["predictions"])
 
-        doc_level_rows = []
-        for i, item in enumerate(to_embed):
-            doc_prediction = int(pred_df.iloc[i]["prediction"])
-            doc_certainty  = float(pred_df.iloc[i]["certainty"])
-
-            # Stamp the document-level prediction onto every chunk
-            item["chunk_predictions"] = {
-                art["article_num"]: {
-                    "prediction": doc_prediction,
-                    "certainty":  doc_certainty,
-                }
-                for art in item["articles"]
+        # Build a lookup: ref_number → prediction row from pred_df
+        pred_by_ref = {
+            to_predict[i]["ref_number"]: {
+                "prediction": int(pred_df.iloc[i]["prediction"]),
+                "certainty":  float(pred_df.iloc[i]["certainty"]),
             }
+            for i in range(len(to_predict))
+        }
+
+        doc_level_rows = []
+        for item in to_predict:
+            pred = pred_by_ref.get(item["ref_number"], {"prediction": 0, "certainty": 0.0})
+            doc_prediction = pred["prediction"]
+            doc_certainty  = pred["certainty"]
 
             doc_level_rows.append({
                 **{k: item[k] for k in ("ref_number", "doc_type", "short_text", "pub_date", "url")
                    if k in item},
                 "prediction": doc_prediction,
                 "certainty":  round(doc_certainty, 3),
-                "chunks":     len(item["articles"]),
             })
+
+        # Stamp prediction onto substantive chunks for DB storage
+        for item in to_embed:
+            pred = pred_by_ref.get(item["ref_number"], {"prediction": 0, "certainty": 0.0})
+            item["chunk_predictions"] = {
+                art["article_num"]: pred
+                for art in item["articles"]
+            }
 
         # ── Step 2: save Excel of document-level results ─────────────────────
         result_df = pd.DataFrame(doc_level_rows)
@@ -168,6 +191,7 @@ def _run_predict(job_id: str, scrape_job_id: str):
 
         # ── Step 3: embed chunks + store in DB with prediction labels ─────────
         if _LAW_STORE_AVAILABLE and to_embed:
+            total_chunks = sum(len(item.get("articles", [])) for item in to_embed)
             JOBS[job_id]["progress_text"] = f"Storing {total_chunks} chunks in law database…"
             create_table()
             stored = store_chunks(to_embed)

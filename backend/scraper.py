@@ -65,7 +65,7 @@ def is_substantive(text: str, doc_type: str) -> bool:
 
     # Count articles — use broader pattern to handle "Art. 1." and "Artikel 1."
     article_count = len(re.findall(
-        r"(?m)^\s*Art(?:ikel|icle)?[.\s]\s*\d+", text
+        r"Art(?:ikel|icle)?[.\s]\s*\d+", text
     ))
     if article_count < 3:
         return False
