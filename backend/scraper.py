@@ -146,8 +146,8 @@ def _parse_result_items(soup: BeautifulSoup, doc_type: str) -> list:
             if not anchor:
                 continue
             # href is relative to /cgi/ (e.g. "article.pl?...")
-            # Force lg_txt=Y to get full article text
-            href = anchor["href"].replace("lg_txt=N", "lg_txt=Y")
+            # lg_txt=N serves the text version; lg_txt=Y serves the PDF/image — keep N
+            href = anchor["href"]
             url  = urljoin(BASE_URL + "/", href)
             items.append({
                 "ref_number": button.text.strip(),
@@ -234,16 +234,45 @@ def scrape_documents(start_date: datetime, end_date: datetime, doc_types: list,
 
         scraping_result.extend(type_results)
 
+    # Phrases that indicate the page returned an error instead of law text
+    _UNAVAILABLE_SIGNALS = [
+        "niet beschikbaar in deze taal",
+        "pas disponible dans cette langue",
+        "not available in this language",
+        "beeld van het belgisch staatsblad",
+    ]
+
+    def _extract_full_text(url: str) -> str:
+        """
+        Fetch the detail page and return clean law text.
+        If Dutch text is unavailable, retry with French.
+        Returns empty string if neither language has text.
+        """
+        for lang in ("nl", "fr"):
+            lang_url = url.replace("language=nl", f"language={lang}") if lang == "fr" else url
+            page = requests.get(lang_url, timeout=15)
+            page.encoding = "iso-8859-1"
+            soup = BeautifulSoup(page.text, "html.parser")
+            # Try specific class first (original selector), fall back to article-text
+            main = (
+                soup.find("main", {"class": "page__inner page__inner--content article-text"})
+                or soup.find("main", class_="article-text")
+            )
+            if not main:
+                continue
+            # Collect all paragraph text (avoids warning banners at top of page)
+            paragraphs = [p.get_text(separator=" ", strip=True) for p in main.find_all("p")]
+            text = "\n".join(p for p in paragraphs if p)
+            text_lower = text.lower()
+            if text and not any(sig in text_lower for sig in _UNAVAILABLE_SIGNALS):
+                return text
+        return ""
+
     # Fetch full text and classify each result
     total = len(scraping_result)
     for i, item in enumerate(scraping_result):
         try:
-            page = requests.get(item["url"], timeout=15)
-            page.encoding = "iso-8859-1"
-            soup = BeautifulSoup(page.text, "html.parser")
-            main = soup.find("main", class_="article-text")
-
-            full_text = main.get_text(separator="\n", strip=True) if main else ""
+            full_text = _extract_full_text(item["url"])
             item["long_text"] = full_text
 
             if is_substantive(full_text, item["doc_type"]):
