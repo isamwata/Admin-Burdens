@@ -102,14 +102,15 @@ def _run_scrape(job_id: str, req: ScrapeRequest):
 
 def _run_predict(job_id: str, scrape_job_id: str):
     """
-    Run per-chunk predictions on scraped documents, then store chunks +
+    Run document-level predictions on scraped documents, then store chunks +
     predicted labels into the law_chunks DB table.
 
     Flow:
-      1. For each substantive document, build one DataFrame row per chunk
-      2. predict_documents() assigns prediction (0/1) + certainty per chunk
-      3. Chunks with labels are embedded (OpenAI) and upserted into law_chunks
-      4. Excel summary of document-level results saved for download
+      1. For each substantive document, predict on the full long_text (one row per doc)
+      2. predict_documents() assigns prediction (0/1) + certainty per document
+      3. Document-level prediction is stamped onto every chunk of that document
+      4. Chunks are embedded (OpenAI) and upserted into law_chunks
+      5. Excel summary of document-level results saved for download
     """
     try:
         JOBS[job_id]["status"] = "running"
@@ -121,40 +122,41 @@ def _run_predict(job_id: str, scrape_job_id: str):
         results  = scrape_job.get("result", [])
         to_embed = [r for r in results if r.get("embed") and r.get("articles")]
 
-        # ── Step 1: predict per chunk ────────────────────────────────────────
-        total_chunks = sum(len(r["articles"]) for r in to_embed)
-        JOBS[job_id]["progress_text"] = f"Predicting burden on {total_chunks} chunks…"
+        # ── Step 1: predict on full document text (one row per document) ─────
+        JOBS[job_id]["progress_text"] = f"Predicting burden on {len(to_embed)} documents…"
 
-        doc_level_rows = []   # one row per document for the Excel download
+        doc_rows = pd.DataFrame([
+            {
+                "long_text":  item["long_text"],
+                "ref_number": item["ref_number"],
+                "doc_type":   item["doc_type"],
+                "short_text": item.get("short_text", ""),
+            }
+            for item in to_embed
+        ])
 
-        for item in to_embed:
-            # embedder.preprocess and tokenizer.preprocess both read 'long_text'
-            chunk_rows = pd.DataFrame([
-                {"long_text": art["text"], "ref_number": item["ref_number"],
-                 "doc_type": item["doc_type"], "short_text": item.get("short_text", "")}
-                for art in item["articles"]
-            ])
-            pred_df = predict_documents(chunk_rows, CONFIG["predictions"])
+        pred_df = predict_documents(doc_rows, CONFIG["predictions"])
 
-            # Attach per-chunk prediction back to the item for store_chunks()
+        doc_level_rows = []
+        for i, item in enumerate(to_embed):
+            doc_prediction = int(pred_df.iloc[i]["prediction"])
+            doc_certainty  = float(pred_df.iloc[i]["certainty"])
+
+            # Stamp the document-level prediction onto every chunk
             item["chunk_predictions"] = {
                 art["article_num"]: {
-                    "prediction": int(pred_df.iloc[i]["prediction"]),
-                    "certainty":  float(pred_df.iloc[i]["certainty"]),
+                    "prediction": doc_prediction,
+                    "certainty":  doc_certainty,
                 }
-                for i, art in enumerate(item["articles"])
+                for art in item["articles"]
             }
 
-            # Document-level summary: majority vote across chunks
-            preds = [v["prediction"] for v in item["chunk_predictions"].values()]
-            doc_prediction = 1 if sum(preds) > len(preds) / 2 else 0
-            doc_certainty  = sum(v["certainty"] for v in item["chunk_predictions"].values()) / len(preds)
             doc_level_rows.append({
                 **{k: item[k] for k in ("ref_number", "doc_type", "short_text", "pub_date", "url")
                    if k in item},
                 "prediction": doc_prediction,
                 "certainty":  round(doc_certainty, 3),
-                "chunks":     len(preds),
+                "chunks":     len(item["articles"]),
             })
 
         # ── Step 2: save Excel of document-level results ─────────────────────

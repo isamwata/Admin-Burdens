@@ -1,0 +1,31 @@
+# Cloud Run Job — batch historical ingestion
+# No frontend, no web server — just the Python worker
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc libpq-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements_api.txt .
+RUN pip install --no-cache-dir -r requirements_api.txt
+
+# Dutch spaCy model (needed by predictor)
+RUN python -m spacy download nl_core_news_lg || true
+
+# Application code
+COPY backend/ backend/
+COPY scripts/ scripts/
+COPY config.json .
+
+# Download classifier from HF Model Hub
+RUN pip install --no-cache-dir huggingface_hub && \
+    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='isamwata/belgian-staatsblad-model', local_dir='./model', repo_type='model')"
+
+RUN mkdir -p scraped_data predictions
+RUN chown -R 1000:1000 /app
+USER 1000
+
+# Cloud Run Jobs: CMD is the entrypoint; override via --args flag
+CMD ["python", "-m", "scripts.batch_ingest"]

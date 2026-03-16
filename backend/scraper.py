@@ -247,7 +247,7 @@ def scrape_documents(start_date: datetime, end_date: datetime, doc_types: list,
             item["long_text"] = full_text
 
             if is_substantive(full_text, item["doc_type"]):
-                item["articles"] = sliding_window_chunks(full_text)
+                item["articles"] = [{"article_num": "full", "text": full_text}]
                 item["embed"] = True
             else:
                 item["articles"] = []
